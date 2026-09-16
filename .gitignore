@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 data/samples/
+data/manifest/pattern_gaps.csv
 *.pdf
 
 .venv

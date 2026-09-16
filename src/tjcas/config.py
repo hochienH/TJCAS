@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 SAMPLES_DIR = DATA_DIR / "samples"
+REFERENCE_DIR = DATA_DIR / "reference"
 MANIFEST_DIR = DATA_DIR / "manifest"
 MANIFEST_PATH = MANIFEST_DIR / "sample_manifest.csv"
 
