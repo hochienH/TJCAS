@@ -236,6 +236,7 @@ for citation in find_citations(normalize(judgment_full_text)):
 | 2 | `89年促字第││    26070號` 附表框線切斷 | normalize 時把框線字元換成空白 |
 | 2 | `九十年度南簡字第第九五○號` 重複的「第」 | 允許 `第{1,2}` |
 | 2 | `第一二四六二、一二七九八等號` | 允許 `等?號` |
+| 3 | 定應執行刑附表的 `編號 十   十一   十二` 讓終極 pattern 卡死（單篇 >9 小時） | 空白與案號的量詞改成 possessive，杜絕災難性回溯 |
 
 ## Options of Full Text Similarity Comparison
 

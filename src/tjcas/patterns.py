@@ -24,14 +24,16 @@ ZERO_ALIASES = r"Oo\u3007\u25cb\u25ef\uff2f\uff4f\u039f\u041e\u043e"
 CHINESE_NUM = rf"\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u5eff\u5345\u767e\u5343\u96f6{ZERO_ALIASES}"
 CJK = r"\u4e00-\u9fff"
 
-_SP = r"[ \u3000]*"
+# 空白與數字的量詞一律用 possessive：號、等、之、頓號都不在數字與空白的字元集裡，
+# 回溯救不回一個失敗的比對，只會在附表那種「數字夾長串空白」的排版上指數爆炸
+_SP = r"[ \u3000]*+"
 YEAR = rf"(?:[{ARABIC}]{{1,3}}|[{CHINESE_NUM}]{{1,6}})"
 # 字別本身不會出現這些字，排除可避免向前吃掉上下文
 CODE = rf"(?:(?![\u5e74\u7b2c\u865f\u6708\u65e5\u6c11\u570b])[{CJK}]){{1,10}}"
-_NUMBER_ITEM = rf"(?:[{ARABIC}{CHINESE_NUM}]{_SP}){{1,15}}"
-_SUFFIX = rf"(?:{_SP}\u4e4b{_SP}(?:[{ARABIC}{CHINESE_NUM}]{_SP}){{1,5}})?"
+_NUMBER_ITEM = rf"(?:[{ARABIC}{CHINESE_NUM}]{_SP}){{1,15}}+"
+_SUFFIX = rf"(?:{_SP}\u4e4b{_SP}(?:[{ARABIC}{CHINESE_NUM}]{_SP}){{1,5}}+)?+"
 # 「第六六五六、六六五七、七○○九號」這種頓號連寫記法
-NUMBER = rf"{_NUMBER_ITEM}{_SUFFIX}(?:{_SP}[\u3001,]{_SP}{_NUMBER_ITEM}{_SUFFIX})*"
+NUMBER = rf"{_NUMBER_ITEM}{_SUFFIX}(?:{_SP}[\u3001,]{_SP}{_NUMBER_ITEM}{_SUFFIX})*+"
 
 CITATION_PATTERN = re.compile(
     rf"(?P<year>{YEAR}){_SP}\u5e74{_SP}(?:\u5ea6{_SP})?"
