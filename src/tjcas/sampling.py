@@ -7,6 +7,7 @@ selected ones are streamed out individually with ``rar p``.
 from __future__ import annotations
 
 import csv
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +71,23 @@ def iter_entries(archive: Path) -> Iterator[ArchiveEntry]:
 def largest_entry(archive: Path, suffix: str = ".json") -> ArchiveEntry | None:
     candidates = (e for e in iter_entries(archive) if e.name.endswith(suffix))
     return max(candidates, key=lambda e: e.size, default=None)
+
+
+def iter_entry_names(archive: Path) -> Iterator[str]:
+    """Yield entry paths only; ``rar lb`` is far cheaper to parse than ``rar l``."""
+    output = _run_rar(["lb", str(archive)]).stdout.decode("utf-8", errors="replace")
+    for line in output.splitlines():
+        name = line.strip()
+        if name:
+            yield name
+
+
+def extract_archive(archive: Path, dest_dir: Path) -> Path:
+    """Extract a whole archive into ``dest_dir/<stem>`` and return that directory."""
+    target = dest_dir / archive.stem
+    target.mkdir(parents=True, exist_ok=True)
+    _run_rar(["x", "-inul", "-o+", "-y", str(archive), f"{target}{os.sep}"])
+    return target
 
 
 def extract_entry(entry: ArchiveEntry, dest_dir: Path) -> Path:
