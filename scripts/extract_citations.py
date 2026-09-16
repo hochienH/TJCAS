@@ -13,9 +13,8 @@ from tjcas.sampling import list_archives
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, help="only process the first N archives")
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=32)
     parser.add_argument("--out", default=str(CITATIONS_DIR))
-    parser.add_argument("--work-dir", help="scratch space for extraction (default WORK_ROUTE)")
     parser.add_argument(
         "--no-resume", action="store_true", help="reprocess archives that already have output"
     )
@@ -25,7 +24,6 @@ def main() -> None:
     reports = run(
         archives,
         out_dir=Path(args.out),
-        work_dir=Path(args.work_dir) if args.work_dir else None,
         workers=args.workers,
         resume=not args.no_resume,
     )

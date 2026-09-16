@@ -2,28 +2,26 @@
 
 Full text is never kept for the whole corpus, so the texts needed here are
 fetched on demand: occurrences are grouped by the archive they live in, each
-archive is expanded once, the needed judgments are read, and the archive is
-thrown away again. What lands on disk is only the citing contexts (±window
-characters) and the full text of candidate files, both inside a single SQLite
-work database.
+archive is streamed once out of ``rar p``, and only the rows that matter are
+kept — the citing contexts (±window characters) and the full text of candidate
+files, both inside a single SQLite work database.
 """
 
 from __future__ import annotations
 
 import csv
 import gzip
-import json
-import os
-import shutil
 import sqlite3
 from collections import defaultdict
 from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from tjcas.candidates import CANDIDATES_DB
-from tjcas.config import CITATIONS_DIR, RESOLUTION_DIR, get_data_route, get_work_route
+from tjcas.citations import judgment_text
+from tjcas.config import CITATIONS_DIR, RESOLUTION_DIR, get_data_route
 from tjcas.patterns import normalize
-from tjcas.sampling import extract_archive
+from tjcas.sampling import stream_entries
 from tjcas.similarity import METHODS, agreement, rank
 
 RESOLUTION_DB = RESOLUTION_DIR / "resolution.sqlite"
@@ -159,61 +157,41 @@ def build_occurrences(
         return connection.execute("SELECT COUNT(*) FROM occurrences").fetchone()[0]
 
 
-def _read_judgments(root: Path, entries: set[str]) -> Iterator[tuple[str, str]]:
-    for entry in entries:
-        path = root / entry
-        if not path.is_file():
+def _read_judgments(archive: Path, entries: set[str]) -> Iterator[tuple[str, str]]:
+    """Stream ``archive`` once and yield the wanted entries as ``(name, JFULL)``."""
+    remaining = set(entries)
+    for entry, payload in stream_entries(archive):
+        if entry.name not in remaining:
             continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            continue
-        full = payload.get("JFULL")
-        if isinstance(full, str) and full:
-            yield entry, full
-
-
-def _extract_for(archive: Path, work_dir: Path, prefix: str) -> Path:
-    return extract_archive(archive, work_dir / f"{prefix}-{os.getpid()}")
+        remaining.discard(entry.name)
+        full_text = judgment_text(payload)
+        if full_text is not None:
+            yield entry.name, full_text
+        if not remaining:
+            return
 
 
 def _context_worker(
     archive: Path,
     spans: dict[str, list[tuple[int, int, int]]],
-    work_dir: Path,
     window: int,
 ) -> list[tuple[int, str]]:
-    root = _extract_for(archive, work_dir, "ctx")
     results: list[tuple[int, str]] = []
-    try:
-        for entry, full_text in _read_judgments(root, set(spans)):
-            text = normalize(full_text)
-            for occurrence_id, start, end in spans[entry]:
-                results.append(
-                    (occurrence_id, text[max(0, start - window) : end + window])
-                )
-    finally:
-        shutil.rmtree(root.parent, ignore_errors=True)
+    for entry, full_text in _read_judgments(archive, set(spans)):
+        text = normalize(full_text)
+        for occurrence_id, start, end in spans[entry]:
+            results.append((occurrence_id, text[max(0, start - window) : end + window]))
     return results
 
 
-def _candidate_worker(
-    archive: Path, entries: set[str], work_dir: Path
-) -> list[tuple[str, str, bytes]]:
-    root = _extract_for(archive, work_dir, "cand")
-    results: list[tuple[str, str, bytes]] = []
-    try:
-        for entry, full_text in _read_judgments(root, entries):
-            payload = gzip.compress(normalize(full_text).encode("utf-8"), 1)
-            results.append((archive.stem, entry, payload))
-    finally:
-        shutil.rmtree(root.parent, ignore_errors=True)
-    return results
+def _candidate_worker(archive: Path, entries: set[str]) -> list[tuple[str, str, bytes]]:
+    return [
+        (archive.stem, entry, gzip.compress(normalize(full_text).encode("utf-8"), 1))
+        for entry, full_text in _read_judgments(archive, entries)
+    ]
 
 
 def _run_archive_tasks(worker, tasks, workers, verbose, label):
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(worker, *task): task[0] for task in tasks}
         for done, future in enumerate(as_completed(futures), start=1):
@@ -229,14 +207,12 @@ def _run_archive_tasks(worker, tasks, workers, verbose, label):
 
 def fetch_contexts(
     db_path: Path = RESOLUTION_DB,
-    work_dir: Path | None = None,
     window: int = DEFAULT_WINDOW,
-    workers: int = 8,
+    workers: int = 32,
     verbose: bool = True,
 ) -> int:
-    """Re-extract the citing judgments and store ±``window`` characters around each span."""
+    """Re-stream the citing judgments and store ±``window`` characters around each span."""
     route = get_data_route()
-    scratch = work_dir or get_work_route()
     with _connect(db_path) as connection:
         connection.execute("DELETE FROM contexts")
         grouped: dict[str, dict[str, list[tuple[int, int, int]]]] = defaultdict(
@@ -248,7 +224,7 @@ def fetch_contexts(
         for occurrence_id, archive, entry, start, end in cursor:
             grouped[archive][entry].append((occurrence_id, start, end))
         tasks = [
-            (route / f"{archive}.rar", dict(spans), scratch, window)
+            (route / f"{archive}.rar", dict(spans), window)
             for archive, spans in sorted(grouped.items())
         ]
         total = 0
@@ -262,13 +238,11 @@ def fetch_contexts(
 
 def fetch_candidate_texts(
     db_path: Path = RESOLUTION_DB,
-    work_dir: Path | None = None,
-    workers: int = 8,
+    workers: int = 32,
     verbose: bool = True,
 ) -> int:
-    """Re-extract every candidate judgment and cache its normalized full text."""
+    """Re-stream every candidate judgment and cache its normalized full text."""
     route = get_data_route()
-    scratch = work_dir or get_work_route()
     with _connect(db_path) as connection:
         grouped: dict[str, set[str]] = defaultdict(set)
         cursor = connection.execute(
@@ -279,7 +253,7 @@ def fetch_candidate_texts(
         for archive, entry in cursor:
             grouped[archive].add(entry)
         tasks = [
-            (route / f"{archive}.rar", entries, scratch)
+            (route / f"{archive}.rar", entries)
             for archive, entries in sorted(grouped.items())
         ]
         total = 0

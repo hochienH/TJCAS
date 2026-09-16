@@ -14,7 +14,7 @@ def main() -> None:
     parser.add_argument("--citations", default=str(CITATIONS_DIR))
     parser.add_argument("--corpus-db", default=str(CORPUS_DB))
     parser.add_argument("--db", default=str(CANDIDATES_DB))
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=32)
     args = parser.parse_args()
 
     db_path = Path(args.db)

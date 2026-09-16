@@ -71,7 +71,7 @@ def _count_file(path: Path) -> list[tuple[str, str, str, int]]:
 def collect_keys(
     citations_dir: Path = CITATIONS_DIR,
     db_path: Path = CANDIDATES_DB,
-    workers: int = 8,
+    workers: int = 32,
     verbose: bool = True,
 ) -> int:
     """Aggregate stage-1 output into distinct keys with occurrence counts."""
@@ -125,7 +125,7 @@ def _chunks(items: Iterable[tuple[str, str, str]], size: int) -> Iterator[list]:
 def resolve_keys(
     db_path: Path = CANDIDATES_DB,
     corpus_db: Path = CORPUS_DB,
-    workers: int = 8,
+    workers: int = 32,
     chunk_size: int = 20_000,
     verbose: bool = True,
 ) -> Counter[str]:

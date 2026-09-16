@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -32,16 +31,4 @@ def get_data_route() -> Path:
     route = Path(raw.strip().strip("\"'")).expanduser()
     if not route.is_dir():
         raise RuntimeError(f"DATA_ROUTE does not point to a directory: {route}")
-    return route
-
-
-def get_work_route() -> Path:
-    """Scratch space for per-archive extraction; prefer a local disk over NFS."""
-    raw = os.getenv("WORK_ROUTE")
-    route = (
-        Path(raw.strip().strip("\"'")).expanduser()
-        if raw
-        else Path(tempfile.gettempdir()) / "tjcas"
-    )
-    route.mkdir(parents=True, exist_ok=True)
     return route

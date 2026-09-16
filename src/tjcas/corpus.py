@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tjcas.config import CORPUS_DB
-from tjcas.sampling import iter_entry_names, list_archives
+from tjcas.sampling import iter_entries, list_archives
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -81,8 +81,8 @@ def parse_entry_name(archive: str, entry: str) -> DocumentRef | None:
 def _archive_rows(archive: Path) -> list[tuple[str, ...]]:
     stem = archive.stem
     rows = []
-    for entry in iter_entry_names(archive):
-        ref = parse_entry_name(stem, entry)
+    for entry in iter_entries(archive):
+        ref = parse_entry_name(stem, entry.name)
         if ref is not None:
             rows.append(
                 (ref.archive, ref.entry, ref.court, ref.year, ref.code,
@@ -94,7 +94,7 @@ def _archive_rows(archive: Path) -> list[tuple[str, ...]]:
 def build_index(
     archives: Iterable[Path] | None = None,
     db_path: Path = CORPUS_DB,
-    workers: int = 8,
+    workers: int = 32,
     verbose: bool = True,
 ) -> int:
     """Rebuild the filename index from scratch. Returns the number of documents."""

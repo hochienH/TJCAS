@@ -24,17 +24,15 @@ def main() -> None:
     parser.add_argument("--candidates-db", default=str(CANDIDATES_DB))
     parser.add_argument("--db", default=str(RESOLUTION_DB))
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW)
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=32)
     parser.add_argument("--limit-keys", type=int, help="only the N most cited ambiguous keys")
     parser.add_argument("--max-per-key", type=int, help="cap occurrences kept per key")
-    parser.add_argument("--work-dir", help="scratch space for extraction (default WORK_ROUTE)")
     parser.add_argument(
         "--skip-fetch", action="store_true", help="reuse the texts already in the work database"
     )
     args = parser.parse_args()
 
     db_path = Path(args.db)
-    work_dir = Path(args.work_dir) if args.work_dir else None
     if not args.skip_fetch:
         occurrences = build_occurrences(
             Path(args.citations),
@@ -44,9 +42,9 @@ def main() -> None:
             max_per_key=args.max_per_key,
         )
         print(f"\nambiguous occurrences: {occurrences:,}")
-        contexts = fetch_contexts(db_path, work_dir, args.window, args.workers)
+        contexts = fetch_contexts(db_path, args.window, args.workers)
         print(f"contexts fetched: {contexts:,}")
-        texts = fetch_candidate_texts(db_path, work_dir, args.workers)
+        texts = fetch_candidate_texts(db_path, args.workers)
         print(f"candidate texts fetched: {texts:,}")
 
     resolved = resolve(db_path)

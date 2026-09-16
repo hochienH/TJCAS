@@ -1,9 +1,9 @@
 """Stage 1: extract the citation list of every judgment in the corpus.
 
-Archives are expanded one at a time into scratch space, scanned, then deleted —
-the full text is never kept, only ``(citing entry, year, code, number, span)``.
-The span points into ``patterns.normalize(JFULL)``, so stage 3 can recover the
-surrounding context by re-extracting just the judgments it needs.
+Archives are streamed straight out of ``rar p``, so nothing is ever written to
+disk; only ``(citing entry, year, code, number, span)`` is kept. The span points
+into ``patterns.normalize(JFULL)``, so stage 3 can recover the surrounding
+context by re-streaming just the archives it needs.
 """
 
 from __future__ import annotations
@@ -11,17 +11,16 @@ from __future__ import annotations
 import csv
 import gzip
 import json
-import shutil
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
-from tjcas.config import CITATIONS_DIR, get_work_route
+from tjcas.config import CITATIONS_DIR
 from tjcas.corpus import parse_entry_name
 from tjcas.numbers import split_suffix, to_arabic
 from tjcas.patterns import find_citations, normalize
-from tjcas.sampling import extract_archive, list_archives
+from tjcas.sampling import list_archives, stream_entries
 
 FIELDNAMES = ["entry", "year", "code", "number", "suffix", "start", "end"]
 
@@ -35,16 +34,14 @@ class ArchiveReport:
     self_refs: int
 
 
-def iter_judgments(root: Path) -> Iterator[tuple[str, str]]:
-    """Yield ``(entry path relative to root, JFULL)`` for every judgment JSON."""
-    for path in sorted(root.rglob("*.json")):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            continue
-        full = payload.get("JFULL")
-        if isinstance(full, str) and full:
-            yield path.relative_to(root).as_posix(), full
+def judgment_text(payload: bytes) -> str | None:
+    """Return the JFULL of a judgment JSON blob, or None if it has none."""
+    try:
+        document = json.loads(payload.decode("utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    full = document.get("JFULL") if isinstance(document, dict) else None
+    return full if isinstance(full, str) and full else None
 
 
 def citation_rows(
@@ -92,31 +89,29 @@ def _write_rows(path: Path, rows: Iterable[dict[str, object]]) -> None:
     staging.replace(path)
 
 
-def process_archive(archive: Path, out_dir: Path, work_dir: Path) -> ArchiveReport:
-    root = extract_archive(archive, work_dir)
+def process_archive(archive: Path, out_dir: Path) -> ArchiveReport:
     documents = citations = unparsable = self_refs = 0
     rows: list[dict[str, object]] = []
-    try:
-        for entry, full_text in iter_judgments(root):
-            documents += 1
-            ref = parse_entry_name(archive.stem, entry)
-            own_key = (ref.year, ref.code, ref.number) if ref else None
-            found, skipped, own = citation_rows(entry, full_text, own_key)
-            rows.extend(found)
-            citations += len(found)
-            unparsable += skipped
-            self_refs += own
-        _write_rows(out_dir / f"{archive.stem}.csv.gz", rows)
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    for entry, payload in stream_entries(archive):
+        full_text = judgment_text(payload)
+        if full_text is None:
+            continue
+        documents += 1
+        ref = parse_entry_name(archive.stem, entry.name)
+        own_key = (ref.year, ref.code, ref.number) if ref else None
+        found, skipped, own = citation_rows(entry.name, full_text, own_key)
+        rows.extend(found)
+        citations += len(found)
+        unparsable += skipped
+        self_refs += own
+    _write_rows(out_dir / f"{archive.stem}.csv.gz", rows)
     return ArchiveReport(archive.stem, documents, citations, unparsable, self_refs)
 
 
 def run(
     archives: Iterable[Path] | None = None,
     out_dir: Path = CITATIONS_DIR,
-    work_dir: Path | None = None,
-    workers: int = 8,
+    workers: int = 32,
     resume: bool = True,
     verbose: bool = True,
 ) -> list[ArchiveReport]:
@@ -125,11 +120,10 @@ def run(
         targets = [a for a in targets if not (out_dir / f"{a.stem}.csv.gz").exists()]
     if not targets:
         return []
-    scratch = work_dir or get_work_route()
     reports: list[ArchiveReport] = []
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(process_archive, archive, out_dir, scratch): archive
+            pool.submit(process_archive, archive, out_dir): archive
             for archive in targets
         }
         for done, future in enumerate(as_completed(futures), start=1):

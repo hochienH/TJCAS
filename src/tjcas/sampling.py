@@ -1,13 +1,12 @@
-"""Sample judgment JSON files out of the monthly RAR archives.
+"""Read judgment JSON out of the monthly RAR archives.
 
-Archives are never fully extracted: entries are listed with ``rar l`` and the
-selected ones are streamed out individually with ``rar p``.
+Archives are never written to disk: entries are listed with ``rar l`` and their
+contents are streamed straight out of ``rar p``.
 """
 
 from __future__ import annotations
 
 import csv
-import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,21 +72,31 @@ def largest_entry(archive: Path, suffix: str = ".json") -> ArchiveEntry | None:
     return max(candidates, key=lambda e: e.size, default=None)
 
 
-def iter_entry_names(archive: Path) -> Iterator[str]:
-    """Yield entry paths only; ``rar lb`` is far cheaper to parse than ``rar l``."""
-    output = _run_rar(["lb", str(archive)]).stdout.decode("utf-8", errors="replace")
-    for line in output.splitlines():
-        name = line.strip()
-        if name:
-            yield name
+def stream_entries(archive: Path) -> Iterator[tuple[ArchiveEntry, bytes]]:
+    """Yield ``(entry, raw bytes)`` for every file in ``archive``, touching no disk.
 
-
-def extract_archive(archive: Path, dest_dir: Path) -> Path:
-    """Extract a whole archive into ``dest_dir/<stem>`` and return that directory."""
-    target = dest_dir / archive.stem
-    target.mkdir(parents=True, exist_ok=True)
-    _run_rar(["x", "-inul", "-o+", "-y", str(archive), f"{target}{os.sep}"])
-    return target
+    ``rar p`` writes the entries back to back in listing order, so the stream is
+    cut up using the sizes ``rar l`` already reported.
+    """
+    entries = list(iter_entries(archive))
+    process = subprocess.Popen(
+        [RAR_BIN, "p", "-inul", str(archive)], stdout=subprocess.PIPE
+    )
+    stdout = process.stdout
+    assert stdout is not None
+    try:
+        for entry in entries:
+            payload = stdout.read(entry.size)
+            if len(payload) != entry.size:
+                raise RuntimeError(
+                    f"{archive.name}: stream ended inside {entry.name}"
+                )
+            yield entry, payload
+    finally:
+        stdout.close()
+        if process.poll() is None:
+            process.terminate()
+        process.wait()
 
 
 def extract_entry(entry: ArchiveEntry, dest_dir: Path) -> Path:

@@ -80,6 +80,8 @@ regex 的條件寫的一旦多起來，很容易會導致邏輯衝突而匹配�
 
 單靠人工看無法確認 regex 有沒漏抓，因此除了終極 pattern 之外另寫了一組刻意寬鬆的 partial pattern（把 X、Y、Z 其中一個欄位放寬成 `.{1,25}?`）。每輪同時跑全部 pattern，**寬鬆 pattern 抓到但終極 pattern 沒抓到**的那些就是遺漏，連同上下文寫到 `pattern_gaps.csv` 供人工檢視，再回頭補 regex。
 
+這件事必須在全語料尺度做，而且要在階段一之**前**：改 pattern 會讓已經抽好的引用全部失效。全語料的遺漏數量多到人看不完，所以 `scripts/audit_corpus_patterns.py` 會把每筆遺漏折成**形狀**（數字一律換成 `#`）再計數：`89年促字第26070號` 與 `90年促字第12345號` 是同一個問題，不是兩個。
+
 ### 第二階段：案件比對
 
 引用文字前面的法院名稱寫法太發散（`最高法院`、`本院`、`鈞院`、`原審法院`），與其去救它，不如**繞過它**：開放資料的檔名本身就是 `法院,年度,字別,案號,日期,序號.json`，所以 regex 拿到的 `X年Y字第Z號` 可以直接拿去比對全語料的檔名。這一階段不抽樣，全語料跑。
@@ -88,10 +90,12 @@ regex 的條件寫的一旦多起來，很容易會導致邏輯衝突而匹配�
 
 | 階段 | 做法 | 產出 |
 |---|---|---|
-| 0. 建索引 | `rar lb` 只列檔名不解壓縮，把 `(年, 字別, 案號)` → 檔案 寫進 SQLite | `data/index/corpus.sqlite` |
-| 1. 抽引用 | 逐包解壓到暫存區掃完即刪，只留 `(引用者, 年, 字別, 案號, span)` | `data/citations/*.csv.gz` |
+| 0. 建索引 | `rar l` 只列檔名不解壓縮，把 `(年, 字別, 案號)` → 檔案 寫進 SQLite | `data/index/corpus.sqlite` |
+| 1. 抽引用 | 逐包串流讀全文，只留 `(引用者, 年, 字別, 案號, span)` | `data/citations/*.csv.gz` |
 | 2. 標候選 | 去重後的 key 查索引，標記命中 0 / 1 / ≥2 筆 | `data/candidates/` |
 | 3. 消歧 | 對 ≥2 筆的引用跑三種相似度方法，比較彼此的一致性 | `data/resolution/` |
+
+全語料 50 GB、千萬篇以上，所以**全程不解壓縮到磁碟**：`rar l` 已經報出每個 entry 的精確大小，而 `rar p` 會照同一順序把內容串到 stdout，因此可以按大小切片得到每一篇的全文。
 
 第 2 步的三種結果各有意義：`none` 是本專案的核心限制（1996 年前的判決不在開放資料中，或該字號其實是檢方案號）；`unique` 已經定案，不需要 NLP；`ambiguous` 才是第 3 步要處理的對象——同一組 `年/字別/案號` 在不同法院、不同審級可能各有一篇（例如 `85年台上字第326號` 民事、刑事各一）。
 
@@ -133,6 +137,7 @@ src/tjcas/
   sampling.py      從壓縮檔列清單與抽取判決
   case_types.py    字別字典（PDF 解析 + 檔名統計）
   patterns.py      引用 regex：終極 pattern 與 partial pattern
+  gaps.py          全語料 regex 遺漏稽核（遺漏折成形狀計數）
   numbers.py       國字數字 → 阿拉伯數字（位值制與逐字制）
   corpus.py        全語料檔名索引（SQLite）
   citations.py     階段一：全語料引用抽取
@@ -143,6 +148,7 @@ scripts/
   sample_cases.py        抽樣
   build_case_types.py    建字別字典
   audit_patterns.py      pattern 稽核與遺漏報告
+  audit_corpus_patterns.py  全語料 pattern 遺漏稽核
   build_corpus_index.py  建全語料檔名索引
   extract_citations.py   階段一
   match_candidates.py    階段二
@@ -151,8 +157,7 @@ data/
   samples/         抽出的判決 JSON（不進版控）
   reference/       實施要點 PDF（不進版控）
   manifest/        樣本清單、字別字典、稽核報告
-  index/           全語料檔名索引（不進版控，可重建）
-  citations/       階段一產出（不進版控）
+  index/           全語料檔名索引（不進版控，可重建）  citations/       階段一產出（不進版控）
   candidates/      階段二產出（不進版控）
   resolution/      階段三產出（不進版控）
 ```
@@ -194,7 +199,10 @@ virtualenv --python python3.12 .venv
 第二階段（全語料，建議在 tmux 裡跑）：
 
 ```bash
-# 0. 建全語料檔名索引
+# 0a. 先跨全語料稽核 regex 遺漏（改 pattern 會讓階段一全部失效，必須先跑）
+.venv/bin/python scripts/audit_corpus_patterns.py [--workers N]
+
+# 0b. 建全語料檔名索引
 .venv/bin/python scripts/build_corpus_index.py [--workers N]
 
 # 1. 抽出每篇判決的引用清單（逐包處理，可中斷續跑）
@@ -207,7 +215,7 @@ virtualenv --python python3.12 .venv
 .venv/bin/python scripts/resolve_ambiguous.py [--limit-keys N] [--max-per-key N]
 ```
 
-解壓縮的暫存區預設是系統 temp，可以在 `.env` 設 `WORK_ROUTE` 指到本機磁碟（跑在 NFS 上會慢很多）。
+所有階段都不寫檔到磁碟，因此不需要暫存區；一個 worker 負責一個壓縮檔，跑完就拿下一個。
 
 程式中使用：
 
