@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tjcas.config import CITATIONS_DIR
+from tjcas.codes import normalize_code
 from tjcas.corpus import parse_entry_name
 from tjcas.numbers import split_suffix, to_arabic
 from tjcas.patterns import find_citations, normalize
@@ -62,14 +63,15 @@ def citation_rows(
         if year is None or number is None:
             unparsable += 1
             continue
-        if own_key is not None and (year, citation.code, number) == own_key:
+        code = normalize_code(citation.code)
+        if own_key is not None and (year, code, number) == own_key:
             self_refs += 1
             continue
         rows.append(
             {
                 "entry": entry,
                 "year": year,
-                "code": citation.code,
+                "code": code,
                 "number": number,
                 "suffix": to_arabic(suffix) or "" if suffix else "",
                 "start": citation.start,
@@ -98,7 +100,7 @@ def process_archive(archive: Path, out_dir: Path) -> ArchiveReport:
             continue
         documents += 1
         ref = parse_entry_name(archive.stem, entry.name)
-        own_key = (ref.year, ref.code, ref.number) if ref else None
+        own_key = (ref.year, ref.code_norm, ref.number) if ref else None
         found, skipped, own = citation_rows(entry.name, full_text, own_key)
         rows.extend(found)
         citations += len(found)
