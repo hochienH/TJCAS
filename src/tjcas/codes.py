@@ -16,11 +16,15 @@ import unicodedata
 
 # U+F674..U+F67E, confirmed against each judgment's own citation of its case
 # number (see /tmp/pua_extrapolate.py): codepoint 0xF67F - n encodes round n.
-# 0xE686 also showed up in one filename but resolved to garbage on the only
-# occurrence found, so it is deliberately left unmapped.
 _PUA_ROUND = re.compile(r"[\uf674-\uf67e]")
 _ROUND_WORDS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一"]
 _BRACKETS = str.maketrans("", "", "()\u3008\u3009\u3014\u3015\u3010\u3011")
+
+# U+E686 is unrelated to the Big5 block above — it appears in exactly one
+# filename (KMHM,89,\uE686,1) and JFULL renders it as the real character 鴮
+# ("上更鴮字第一號"). That is an OCR/transcription error, not this judgment's
+# actual 字別: the case is externally confirmed as 上更(一) — round 1.
+_LITERAL_OVERRIDES = {"\ue686": "一"}
 
 
 def _round_word(match: re.Match[str]) -> str:
@@ -36,4 +40,6 @@ def normalize_code(code: str) -> str:
     ``上更一``.
     """
     text = _PUA_ROUND.sub(_round_word, unicodedata.normalize("NFKC", code))
+    for literal, replacement in _LITERAL_OVERRIDES.items():
+        text = text.replace(literal, replacement)
     return text.translate(_BRACKETS).strip()
