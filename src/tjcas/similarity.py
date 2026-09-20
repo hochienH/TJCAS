@@ -60,10 +60,16 @@ def rank(context: str, candidate_texts: Sequence[str]) -> dict[str, Choice]:
 
 
 def agreement(decisions: Sequence[Mapping[str, object]]) -> dict[str, float]:
-    """Pairwise and unanimous top-1 agreement rates across the three methods.
+    """Pairwise, unanimous and no-majority top-1 rates across the three methods.
 
     Each decision maps a method name to whatever identifies its pick (an index,
     a filename, ...); only equality between methods matters.
+
+    ``no_majority`` is the share of decisions no candidate wins: the most
+    popular pick is chosen by at most half the methods, so three methods
+    splitting 1-1-1 count but 2-1 does not. Written as a share of the method
+    count rather than hard-coded to three, so adding a method to ``METHODS``
+    keeps the definition.
     """
     names = sorted(METHODS)
     pairs = [(a, b) for i, a in enumerate(names) for b in names[i + 1 :]]
@@ -72,8 +78,11 @@ def agreement(decisions: Sequence[Mapping[str, object]]) -> dict[str, float]:
         for left, right in pairs:
             if decision[left] == decision[right]:
                 hits[f"{left}~{right}"] += 1
-        if len({decision[name] for name in names}) == 1:
+        picks: Counter[object] = Counter(decision[name] for name in names)
+        if len(picks) == 1:
             hits["unanimous"] += 1
+        if max(picks.values()) * 2 <= len(names):
+            hits["no_majority"] += 1
     total = len(decisions) or 1
-    labels = [f"{a}~{b}" for a, b in pairs] + ["unanimous"]
+    labels = [f"{a}~{b}" for a, b in pairs] + ["unanimous", "no_majority"]
     return {label: hits[label] / total for label in labels}

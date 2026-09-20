@@ -49,8 +49,10 @@ def main() -> None:
 
     resolved = resolve(db_path)
     print(f"occurrences resolved: {resolved:,}")
-    for label, rate in report(db_path).items():
-        print(f"{label:<16}{rate:.4f}")
+    for view, rates in report(db_path).items():
+        print(f"\n[{view}]")
+        for label, rate in rates.items():
+            print(f"{label:<16}{rate:.4f}")
 
 
 if __name__ == "__main__":

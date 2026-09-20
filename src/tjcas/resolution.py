@@ -315,12 +315,32 @@ def resolve(db_path: Path = RESOLUTION_DB, verbose: bool = True) -> int:
         return resolved
 
 
+def _case_id(entry: str) -> str:
+    """Identify the *case* behind a file: the ``court,year,code,number`` prefix.
+
+    One case can be published as several files that differ only in the tail of
+    the name (``...,20250318,7.json`` and ``...,20250318,6.json``), and those
+    files need not sit in the same monthly archive, so neither the tail nor the
+    archive belongs in this key. The court does: drop it and every candidate of
+    an ambiguous key collapses onto one id, making agreement trivially 1.
+    """
+    name = entry.rsplit("/", 1)[-1].removesuffix(".json")
+    return ",".join(name.split(",")[:4])
+
+
 def report(
     db_path: Path = RESOLUTION_DB,
     predictions_csv: Path = PREDICTIONS_CSV,
     agreement_csv: Path = AGREEMENT_CSV,
-) -> dict[str, float]:
-    """Export per-occurrence predictions and the cross-method agreement rates."""
+) -> dict[str, dict[str, float]]:
+    """Export per-occurrence predictions and the cross-method agreement rates.
+
+    Agreement is reported under two readings of "the methods picked the same
+    judgment": ``strict`` compares the files themselves, ``loose`` compares the
+    cases behind them (see ``_case_id``). Coarsening can only merge picks, so
+    every ``loose`` agreement rate is >= its ``strict`` counterpart and
+    ``no_majority`` can only fall.
+    """
     predictions_csv.parent.mkdir(parents=True, exist_ok=True)
     names = sorted(METHODS)
     decisions: list[dict[str, str]] = []
@@ -349,12 +369,20 @@ def report(
                     + [value for name in names for value in picks[name]]
                 )
                 decisions.append({name: picks[name][:2] for name in names})
-    rates = agreement(decisions)
+    views = {
+        "strict": decisions,
+        "loose": [
+            {name: _case_id(entry) for name, (_, entry) in decision.items()}
+            for decision in decisions
+        ],
+    }
+    rates = {view: agreement(rows) for view, rows in views.items()}
     with agreement_csv.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["comparison", "agreement_rate", "occurrences"])
-        for label, rate in rates.items():
-            writer.writerow([label, f"{rate:.4f}", len(decisions)])
+        writer.writerow(["view", "comparison", "agreement_rate", "occurrences"])
+        for view, view_rates in rates.items():
+            for label, rate in view_rates.items():
+                writer.writerow([view, label, f"{rate:.4f}", len(decisions)])
     return rates
 
 
