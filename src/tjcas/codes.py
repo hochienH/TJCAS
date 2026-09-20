@@ -26,6 +26,13 @@ _BRACKETS = str.maketrans("", "", "()\u3008\u3009\u3014\u3015\u3010\u3011")
 # actual 字別: the case is externally confirmed as 上更(一) — round 1.
 _LITERAL_OVERRIDES = {"\ue686": "一"}
 
+# 臺 and 台 are the same 字別 spelled two ways (臺上 / 台上, 臺非 / 台非). The fold
+# runs towards 台 because that is what the filenames use: 402,969 documents have
+# a 台 in their 字別 against 12 with a 臺. Judgment text uses both, so without
+# this every 臺上 citation misses a corpus that files them all under 台上 —
+# 1,116,771 occurrences landing in the `none` bucket.
+_VARIANTS = str.maketrans({"臺": "台"})
+
 
 def _round_word(match: re.Match[str]) -> str:
     return _ROUND_WORDS[0xF67F - ord(match.group()) - 1]
@@ -37,9 +44,9 @@ def normalize_code(code: str) -> str:
     NFKC folds ㈠ and full-width brackets into ``(一)``; the remaining Big5 造字
     are mapped explicitly. Every bracket character is then stripped, so
     ``上更(一)``, ``上更㈠``, ``上更〈一〉`` and the post-2018 ``上更一`` all become
-    ``上更一``.
+    ``上更一``. 臺 folds onto 台 for the same reason: same 字別, two spellings.
     """
     text = _PUA_ROUND.sub(_round_word, unicodedata.normalize("NFKC", code))
     for literal, replacement in _LITERAL_OVERRIDES.items():
         text = text.replace(literal, replacement)
-    return text.translate(_BRACKETS).strip()
+    return text.translate(_VARIANTS).translate(_BRACKETS).strip()
