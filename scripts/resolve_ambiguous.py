@@ -47,7 +47,7 @@ def main() -> None:
         texts = fetch_candidate_texts(db_path, args.workers)
         print(f"candidate texts fetched: {texts:,}")
 
-    resolved = resolve(db_path)
+    resolved = resolve(db_path, args.workers)
     print(f"occurrences resolved: {resolved:,}")
     for view, rates in report(db_path).items():
         print(f"\n[{view}]")

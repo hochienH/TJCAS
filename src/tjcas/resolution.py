@@ -13,7 +13,7 @@ import csv
 import gzip
 import sqlite3
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -267,28 +267,26 @@ def fetch_candidate_texts(
         return total
 
 
-def resolve(db_path: Path = RESOLUTION_DB, verbose: bool = True) -> int:
-    """Run all three similarity methods on every ambiguous occurrence."""
-    with _connect(db_path) as connection:
-        connection.execute("DELETE FROM predictions")
-        keys = connection.execute(
-            "SELECT DISTINCT year, code, number FROM occurrences"
-        ).fetchall()
-        resolved = 0
-        for index, key in enumerate(keys, start=1):
-            refs = connection.execute(
-                "SELECT archive, entry FROM candidates "
-                "WHERE year = ? AND code = ? AND number = ?",
-                key,
-            ).fetchall()
-            texts: list[tuple[str, str, str]] = []
-            for archive, entry in refs:
-                row = connection.execute(
-                    "SELECT payload FROM candidate_texts WHERE archive = ? AND entry = ?",
-                    (archive, entry),
-                ).fetchone()
-                if row is not None:
-                    texts.append((archive, entry, gzip.decompress(row[0]).decode("utf-8")))
+def _resolve_batch(
+    db_path: Path, keys: Sequence[tuple[str, str, str]]
+) -> tuple[list[tuple], int]:
+    """Score one batch of keys; returns the prediction rows and the occurrences seen."""
+    rows: list[tuple] = []
+    resolved = 0
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        for key in keys:
+            texts = [
+                (archive, entry, gzip.decompress(payload).decode("utf-8"))
+                for archive, entry, payload in connection.execute(
+                    "SELECT c.archive, c.entry, t.payload FROM candidates c "
+                    "JOIN candidate_texts t "
+                    "ON t.archive = c.archive AND t.entry = c.entry "
+                    "WHERE c.year = ? AND c.code = ? AND c.number = ? "
+                    "ORDER BY c.archive, c.entry",
+                    key,
+                )
+            ]
             if len(texts) < 2:
                 continue
             occurrences = connection.execute(
@@ -297,7 +295,6 @@ def resolve(db_path: Path = RESOLUTION_DB, verbose: bool = True) -> int:
                 "WHERE o.year = ? AND o.code = ? AND o.number = ?",
                 key,
             ).fetchall()
-            rows = []
             for occurrence_id, context in occurrences:
                 for choice in rank(context, [text for _, _, text in texts]).values():
                     if choice.index < 0:
@@ -306,13 +303,61 @@ def resolve(db_path: Path = RESOLUTION_DB, verbose: bool = True) -> int:
                     rows.append(
                         (occurrence_id, choice.method, archive, entry, choice.score, choice.margin)
                     )
-            connection.executemany(
-                "INSERT INTO predictions VALUES (?, ?, ?, ?, ?, ?)", rows
-            )
             resolved += len(occurrences)
-            if verbose and index % 200 == 0:
-                print(f"[{index}/{len(keys)}] keys resolved, {resolved:,} occurrences", flush=True)
-        return resolved
+    finally:
+        connection.close()
+    return rows, resolved
+
+
+def resolve(
+    db_path: Path = RESOLUTION_DB,
+    workers: int = 32,
+    batch_size: int = 200,
+    verbose: bool = True,
+) -> int:
+    """Run all three similarity methods on every ambiguous occurrence.
+
+    Scoring dominates this stage — a decision with the median six candidates
+    costs a quarter of a second — and keys are independent, so they are scored
+    in parallel. Workers only ever read: predictions are spooled to a file while
+    the pool runs and inserted once it is done, because the work database sits on
+    NFS with journal_mode OFF, where a concurrent writer locks readers out
+    instead of making them wait.
+    """
+    with _connect(db_path) as connection:
+        connection.execute("DELETE FROM predictions")
+        keys = connection.execute(
+            "SELECT DISTINCT year, code, number FROM occurrences"
+        ).fetchall()
+    batches = [keys[index : index + batch_size] for index in range(0, len(keys), batch_size)]
+    spool = db_path.parent / f"{db_path.stem}.predictions.spool.gz"
+    resolved = 0
+    if verbose:
+        print(f"{len(keys):,} keys in {len(batches):,} batches, {workers} workers", flush=True)
+    with gzip.open(spool, "wt", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_resolve_batch, db_path, batch) for batch in batches]
+            for done, future in enumerate(as_completed(futures), start=1):
+                rows, count = future.result()
+                writer.writerows(rows)
+                resolved += count
+                if verbose and done % 100 == 0:
+                    print(
+                        f"[{done}/{len(batches)}] batches, {resolved:,} occurrences",
+                        flush=True,
+                    )
+    with _connect(db_path) as connection:
+        with gzip.open(spool, "rt", encoding="utf-8", newline="") as handle:
+            connection.executemany(
+                "INSERT INTO predictions VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    (int(oid), method, archive, entry, float(score), float(margin))
+                    for oid, method, archive, entry, score, margin in csv.reader(handle)
+                ),
+            )
+    spool.unlink()
+    return resolved
 
 
 def _case_id(entry: str) -> str:
