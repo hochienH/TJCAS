@@ -337,11 +337,18 @@ def resolve(
     with gzip.open(spool, "wt", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_resolve_batch, db_path, batch) for batch in batches]
-            for done, future in enumerate(as_completed(futures), start=1):
+            pending = {pool.submit(_resolve_batch, db_path, batch) for batch in batches}
+            for done, future in enumerate(as_completed(pending), start=1):
                 rows, count = future.result()
                 writer.writerows(rows)
                 resolved += count
+                # A future holds on to its result, so keeping all 8,066 of them in
+                # one container keeps every batch's rows alive until the run ends,
+                # long after they have been spooled. Over fifteen million
+                # occurrences that is more than ten gigabytes the parent never
+                # gives back, and this stage cannot be resumed once it is killed.
+                pending.discard(future)
+                del rows, future
                 if verbose and done % 100 == 0:
                     print(
                         f"[{done}/{len(batches)}] batches, {resolved:,} occurrences",
