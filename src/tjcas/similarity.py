@@ -59,6 +59,22 @@ def rank(context: str, candidate_texts: Sequence[str]) -> dict[str, Choice]:
     return choices
 
 
+def majority(decision: Mapping[str, object]) -> tuple[object | None, str]:
+    """The pick more than half the methods made, and how it was reached.
+
+    Returns ``(pick, "unanimous")`` when every method landed on it,
+    ``(pick, "majority")`` when it merely cleared half of them, and
+    ``(None, "none")`` when nothing did — the same threshold ``agreement``
+    counts as ``no_majority``.
+    """
+    names = sorted(METHODS)
+    picks: Counter[object] = Counter(decision[name] for name in names)
+    winner, count = picks.most_common(1)[0]
+    if count * 2 <= len(names):
+        return None, "none"
+    return winner, "unanimous" if len(picks) == 1 else "majority"
+
+
 def agreement(decisions: Sequence[Mapping[str, object]]) -> dict[str, float]:
     """Pairwise, unanimous and no-majority top-1 rates across the three methods.
 

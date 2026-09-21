@@ -22,7 +22,7 @@ from tjcas.citations import judgment_text
 from tjcas.config import CITATIONS_DIR, RESOLUTION_DIR, get_data_route
 from tjcas.patterns import normalize
 from tjcas.sampling import stream_entries
-from tjcas.similarity import METHODS, agreement, rank
+from tjcas.similarity import METHODS, agreement, majority, rank
 
 RESOLUTION_DB = RESOLUTION_DIR / "resolution.sqlite"
 PREDICTIONS_CSV = RESOLUTION_DIR / "predictions.csv.gz"
@@ -385,10 +385,15 @@ def report(
     cases behind them (see ``_case_id``). Coarsening can only merge picks, so
     every ``loose`` agreement rate is >= its ``strict`` counterpart and
     ``no_majority`` can only fall.
+
+    Each row also carries what the methods settled on under either reading and
+    how they got there — unanimously, by majority, or not at all. A reading can
+    reach a majority the other misses, so the two get their own columns.
     """
     predictions_csv.parent.mkdir(parents=True, exist_ok=True)
     names = sorted(METHODS)
-    decisions: list[dict[str, str]] = []
+    decisions: list[dict[str, tuple[str, str]]] = []
+    loose_decisions: list[dict[str, str]] = []
     with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
         cursor = connection.execute(
             "SELECT o.id, o.src_archive, o.src_entry, o.year, o.code, o.number, "
@@ -405,22 +410,30 @@ def report(
                     for name in names
                     for field in ("archive", "entry", "score", "margin")
                 ]
+                + [
+                    "majority_strict_archive",
+                    "majority_strict_entry",
+                    "decision_strict",
+                    "majority_loose",
+                    "decision_loose",
+                ]
             )
             for identity, picks in _group_by_occurrence(cursor):
                 if len(picks) != len(names):
                     continue
+                strict = {name: picks[name][:2] for name in names}
+                loose = {name: _case_id(entry) for name, (_, entry) in strict.items()}
+                strict_pick, strict_mode = majority(strict)
+                loose_pick, loose_mode = majority(loose)
                 writer.writerow(
                     identity
                     + [value for name in names for value in picks[name]]
+                    # no majority means no winner to name, which a CSV writes empty
+                    + [*(strict_pick or ("", "")), strict_mode, loose_pick or "", loose_mode]
                 )
-                decisions.append({name: picks[name][:2] for name in names})
-    views = {
-        "strict": decisions,
-        "loose": [
-            {name: _case_id(entry) for name, (_, entry) in decision.items()}
-            for decision in decisions
-        ],
-    }
+                decisions.append(strict)
+                loose_decisions.append(loose)
+    views = {"strict": decisions, "loose": loose_decisions}
     rates = {view: agreement(rows) for view, rows in views.items()}
     with agreement_csv.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
