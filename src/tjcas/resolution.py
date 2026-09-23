@@ -23,7 +23,7 @@ from tjcas.citations import judgment_text
 from tjcas.config import CITATIONS_DIR, RESOLUTION_DIR, get_data_route
 from tjcas.patterns import normalize
 from tjcas.sampling import stream_entries
-from tjcas.similarity import METHODS, agreement, majority, rank
+from tjcas.similarity import METHODS, CandidateSet, agreement, majority, rank
 
 RESOLUTION_DB = RESOLUTION_DIR / "resolution.sqlite"
 PREDICTIONS_CSV = RESOLUTION_DIR / "predictions.csv.gz"
@@ -327,9 +327,16 @@ def _resolve_batch(
     Returns the prediction rows and, for every key of the batch, how many of its
     occurrences were scored: zero for a key left with fewer than two candidate
     texts, which is finished all the same.
+
+    Scoring goes through ``CandidateSet``, which reassembles CountVectorizer's
+    matrices from scikit-learn's internals. The first occurrence of each batch
+    is also scored by ``rank`` itself, and any difference stops the run: an
+    upgraded scikit-learn that builds its matrices another way must not leave
+    the predictions split between two definitions.
     """
     rows: list[tuple] = []
     done: list[tuple[str, str, str, int]] = []
+    checked = False
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         for key in keys:
@@ -353,8 +360,18 @@ def _resolve_batch(
                 "WHERE o.year = ? AND o.code = ? AND o.number = ?",
                 key,
             ).fetchall()
+            candidates = CandidateSet([text for _, _, text in texts])
             for occurrence_id, context in occurrences:
-                for choice in rank(context, [text for _, _, text in texts]).values():
+                choices = candidates.rank(context)
+                if not checked:
+                    expected = rank(context, [text for _, _, text in texts])
+                    if choices != expected:
+                        raise RuntimeError(
+                            f"CandidateSet disagrees with rank() on occurrence "
+                            f"{occurrence_id}: {choices} != {expected}"
+                        )
+                    checked = True
+                for choice in choices.values():
                     if choice.index < 0:
                         continue
                     archive, entry, _ = texts[choice.index]
