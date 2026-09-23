@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import hashlib
 import sqlite3
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
@@ -267,12 +268,68 @@ def fetch_candidate_texts(
         return total
 
 
+_CHECKPOINT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS done_keys (
+    year     TEXT NOT NULL,
+    code     TEXT NOT NULL,
+    number   TEXT NOT NULL,
+    resolved INTEGER NOT NULL,
+    PRIMARY KEY (year, code, number)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS predictions (
+    occurrence_id INTEGER NOT NULL,
+    method        TEXT NOT NULL,
+    archive       TEXT NOT NULL,
+    entry         TEXT NOT NULL,
+    score         REAL NOT NULL,
+    margin        REAL NOT NULL
+);
+"""
+
+
+def checkpoint_path(db_path: Path) -> Path:
+    """Where ``resolve`` keeps the work it has finished, next to the work database."""
+    return db_path.with_name(f"{db_path.stem}.checkpoint.sqlite")
+
+
+def open_checkpoint(path: Path) -> sqlite3.Connection:
+    """The checkpoint database, created on first use.
+
+    Only the parent process writes here and workers never read it, so WAL is
+    safe, and a batch's predictions commit together with the keys they finish:
+    a process killed at any point loses the batches in flight and nothing else.
+    """
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
+    connection.executescript(_CHECKPOINT_SCHEMA)
+    return connection
+
+
+def key_fingerprint(keys: Sequence[tuple[str, str, str]]) -> str:
+    """Identify a key set, so a checkpoint is never resumed against another one."""
+    digest = hashlib.sha256()
+    for key in sorted(keys):
+        digest.update("\x1f".join(key).encode("utf-8"))
+        digest.update(b"\x1e")
+    return f"{len(keys)}:{digest.hexdigest()}"
+
+
 def _resolve_batch(
     db_path: Path, keys: Sequence[tuple[str, str, str]]
-) -> tuple[list[tuple], int]:
-    """Score one batch of keys; returns the prediction rows and the occurrences seen."""
+) -> tuple[list[tuple], list[tuple[str, str, str, int]]]:
+    """Score one batch of keys.
+
+    Returns the prediction rows and, for every key of the batch, how many of its
+    occurrences were scored: zero for a key left with fewer than two candidate
+    texts, which is finished all the same.
+    """
     rows: list[tuple] = []
-    resolved = 0
+    done: list[tuple[str, str, str, int]] = []
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         for key in keys:
@@ -288,6 +345,7 @@ def _resolve_batch(
                 )
             ]
             if len(texts) < 2:
+                done.append((*key, 0))
                 continue
             occurrences = connection.execute(
                 "SELECT o.id, c.text FROM occurrences o JOIN contexts c "
@@ -303,10 +361,10 @@ def _resolve_batch(
                     rows.append(
                         (occurrence_id, choice.method, archive, entry, choice.score, choice.margin)
                     )
-            resolved += len(occurrences)
+            done.append((*key, len(occurrences)))
     finally:
         connection.close()
-    return rows, resolved
+    return rows, done
 
 
 def resolve(
@@ -314,56 +372,107 @@ def resolve(
     workers: int = 32,
     batch_size: int = 200,
     verbose: bool = True,
+    resume: bool = True,
 ) -> int:
     """Run all three similarity methods on every ambiguous occurrence.
 
     Scoring dominates this stage — a decision with the median six candidates
     costs a quarter of a second — and keys are independent, so they are scored
-    in parallel. Workers only ever read: predictions are spooled to a file while
-    the pool runs and inserted once it is done, because the work database sits on
-    NFS with journal_mode OFF, where a concurrent writer locks readers out
-    instead of making them wait.
+    in parallel. Workers only ever read the work database. The parent records
+    each finished batch in a separate checkpoint database (``checkpoint_path``)
+    and copies the predictions over once every key is done, because the work
+    database runs with journal_mode OFF, where a concurrent writer locks readers
+    out instead of making them wait.
+
+    The full corpus takes days on one machine, long enough for the parent to be
+    killed partway; it has been, by SIGKILL, with nothing in the log. With
+    ``resume`` a rerun skips every key the checkpoint already holds. The
+    checkpoint remembers which key set it was written for and refuses to be
+    resumed against another; ``resume=False`` discards it and starts over.
+
+    Returns the number of occurrences scored, including those a resumed run
+    found already done.
     """
-    with _connect(db_path) as connection:
-        connection.execute("DELETE FROM predictions")
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
         keys = connection.execute(
             "SELECT DISTINCT year, code, number FROM occurrences"
         ).fetchall()
-    batches = [keys[index : index + batch_size] for index in range(0, len(keys), batch_size)]
-    spool = db_path.parent / f"{db_path.stem}.predictions.spool.gz"
-    resolved = 0
-    if verbose:
-        print(f"{len(keys):,} keys in {len(batches):,} batches, {workers} workers", flush=True)
-    with gzip.open(spool, "wt", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
+    total_keys = len(keys)
+    fingerprint = key_fingerprint(keys)
+    path = checkpoint_path(db_path)
+    checkpoint = open_checkpoint(path)
+    try:
+        with checkpoint:
+            if not resume:
+                for table in ("meta", "done_keys", "predictions"):
+                    checkpoint.execute(f"DELETE FROM {table}")
+            stored = checkpoint.execute(
+                "SELECT value FROM meta WHERE name = 'keys'"
+            ).fetchone()
+            if stored is None:
+                checkpoint.execute("INSERT INTO meta VALUES ('keys', ?)", (fingerprint,))
+            elif stored[0] != fingerprint:
+                raise RuntimeError(
+                    f"{path} was written for another set of keys; "
+                    "rerun with resume=False to discard it"
+                )
+        done = set(checkpoint.execute("SELECT year, code, number FROM done_keys"))
+        resolved = checkpoint.execute(
+            "SELECT COALESCE(SUM(resolved), 0) FROM done_keys"
+        ).fetchone()[0]
+        todo = [key for key in keys if key not in done]
+        # The parent idles for days while its workers score, which makes it the
+        # kind of process an OOM killer picks; hold on to no more than it needs.
+        del keys, done
+        batches = [todo[index : index + batch_size] for index in range(0, len(todo), batch_size)]
+        if verbose:
+            print(
+                f"{total_keys:,} keys, {total_keys - len(todo):,} already done; "
+                f"{len(todo):,} left in {len(batches):,} batches, {workers} workers",
+                flush=True,
+            )
+        del todo
         with ProcessPoolExecutor(max_workers=workers) as pool:
             pending = {pool.submit(_resolve_batch, db_path, batch) for batch in batches}
-            for done, future in enumerate(as_completed(pending), start=1):
-                rows, count = future.result()
-                writer.writerows(rows)
-                resolved += count
+            for finished, future in enumerate(as_completed(pending), start=1):
+                rows, finished_keys = future.result()
+                with checkpoint:
+                    checkpoint.executemany(
+                        "INSERT INTO predictions VALUES (?, ?, ?, ?, ?, ?)", rows
+                    )
+                    checkpoint.executemany(
+                        "INSERT INTO done_keys VALUES (?, ?, ?, ?)", finished_keys
+                    )
+                resolved += sum(count for *_, count in finished_keys)
                 # A future holds on to its result, so keeping all 8,066 of them in
                 # one container keeps every batch's rows alive until the run ends,
-                # long after they have been spooled. Over fifteen million
+                # long after they have been checkpointed. Over fifteen million
                 # occurrences that is more than ten gigabytes the parent never
-                # gives back, and this stage cannot be resumed once it is killed.
+                # gives back.
                 pending.discard(future)
-                del rows, future
-                if verbose and done % 100 == 0:
+                del rows, finished_keys, future
+                if verbose and finished % 100 == 0:
                     print(
-                        f"[{done}/{len(batches)}] batches, {resolved:,} occurrences",
+                        f"[{finished}/{len(batches)}] batches, {resolved:,} occurrences",
                         flush=True,
                     )
-    with _connect(db_path) as connection:
-        with gzip.open(spool, "rt", encoding="utf-8", newline="") as handle:
-            connection.executemany(
-                "INSERT INTO predictions VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    (int(oid), method, archive, entry, float(score), float(margin))
-                    for oid, method, archive, entry, score, margin in csv.reader(handle)
-                ),
+        stored_keys = checkpoint.execute("SELECT COUNT(*) FROM done_keys").fetchone()[0]
+    finally:
+        checkpoint.close()
+    if stored_keys != total_keys:
+        raise RuntimeError(f"{path} holds {stored_keys:,} of {total_keys:,} keys")
+    connection = _connect(db_path)
+    try:
+        connection.execute("ATTACH DATABASE ? AS checkpoint", (str(path),))
+        with connection:
+            connection.execute("DELETE FROM predictions")
+            connection.execute(
+                "INSERT INTO predictions SELECT occurrence_id, method, archive, entry, "
+                "score, margin FROM checkpoint.predictions"
             )
-    spool.unlink()
+        connection.execute("DETACH DATABASE checkpoint")
+    finally:
+        connection.close()
     return resolved
 
 
