@@ -1,0 +1,14 @@
+{
+  "A_eligible": 1165394,
+  "B_eligible": 11254462,
+  "C_eligible": 14993716,
+  "n": 100,
+  "seed": "tjcas-annotation-2026-10-28",
+  "generated_at": "2026-10-28T14:51:24",
+  "inputs": {
+    "jurix": "/data/user/JURIX-2026/result/edge_extraction",
+    "predictions": "/data/user/tjcas-work/out/predictions.csv.gz",
+    "citations": "/home/user/TJCAS/data/citations",
+    "corpus_db": "/home/user/TJCAS/data/index/corpus.sqlite"
+  }
+}
