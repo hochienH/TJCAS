@@ -14,6 +14,12 @@ REFERENCE_DIR = DATA_DIR / "reference"
 MANIFEST_DIR = DATA_DIR / "manifest"
 MANIFEST_PATH = MANIFEST_DIR / "sample_manifest.csv"
 
+INDEX_DIR = DATA_DIR / "index"
+CORPUS_DB = INDEX_DIR / "corpus.sqlite"
+CITATIONS_DIR = DATA_DIR / "citations"
+CANDIDATES_DIR = DATA_DIR / "candidates"
+RESOLUTION_DIR = DATA_DIR / "resolution"
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 

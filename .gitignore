@@ -5,6 +5,10 @@ __pycache__/
 *.egg-info/
 data/samples/
 data/manifest/pattern_gaps.csv
+data/index/
+data/citations/
+data/candidates/
+data/resolution/
 *.pdf
 
 .venv

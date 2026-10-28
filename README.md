@@ -10,7 +10,7 @@
 ## Project Status
 In Progress
 
-目前已完成第一階段（regex 抽取）的基礎建設：樣本抽樣、引用 pattern、字別字典與遺漏稽核工具。第二階段（全文相似度比對）尚未開始。
+第一階段（regex 抽取）已完成：樣本抽樣、引用 pattern、字別字典與遺漏稽核工具。第二階段（全文比對）的管線已實作完成並通過小規模測試，全語料的大規模執行尚未進行。
 
 ## Quick Start
 
@@ -80,9 +80,49 @@ regex 的條件寫的一旦多起來，很容易會導致邏輯衝突而匹配�
 
 單靠人工看無法確認 regex 有沒漏抓，因此除了終極 pattern 之外另寫了一組刻意寬鬆的 partial pattern（把 X、Y、Z 其中一個欄位放寬成 `.{1,25}?`）。每輪同時跑全部 pattern，**寬鬆 pattern 抓到但終極 pattern 沒抓到**的那些就是遺漏，連同上下文寫到 `pattern_gaps.csv` 供人工檢視，再回頭補 regex。
 
-### 第二階段：全文相似度比對
+這件事必須在全語料尺度做，而且要在階段一之**前**：改 pattern 會讓已經抽好的引用全部失效。全語料的遺漏數量多到人看不完，所以 `scripts/audit_corpus_patterns.py` 會把每筆遺漏折成**形狀**（數字一律換成 `#`）再計數：`89年促字第26070號` 與 `90年促字第12345號` 是同一個問題，不是兩個。
 
-尚未實作。
+### 第二階段：案件比對
+
+引用文字前面的法院名稱寫法太發散（`最高法院`、`本院`、`鈞院`、`原審法院`），與其去救它，不如**繞過它**：開放資料的檔名本身就是 `法院,年度,字別,案號,日期,序號.json`，所以 regex 拿到的 `X年Y字第Z號` 可以直接拿去比對全語料的檔名。這一階段不抽樣，全語料跑。
+
+分成三步：
+
+| 階段 | 做法 | 產出 |
+|---|---|---|
+| 0. 建索引 | `rar l` 只列檔名不解壓縮，把 `(年, 字別, 案號)` → 檔案 寫進 SQLite | `data/index/corpus.sqlite` |
+| 1. 抽引用 | 逐包串流讀全文，只留 `(引用者, 年, 字別, 案號, span)` | `data/citations/*.csv.gz` |
+| 2. 標候選 | 去重後的 key 查索引，標記命中 0 / 1 / ≥2 筆 | `data/candidates/` |
+| 3. 消歧 | 對 ≥2 筆的引用跑三種相似度方法，比較彼此的一致性 | `data/resolution/` |
+
+全語料 50 GB、千萬篇以上，所以**全程不解壓縮到磁碟**：`rar l` 已經報出每個 entry 的精確大小，而 `rar p` 會照同一順序把內容串到 stdout，因此可以按大小切片得到每一篇的全文。
+
+### 字別正規化
+
+同一個字別在檔名裡橫跨數個時代、數種編碼，`上更(一)` 這個字別實際上有四種寫法：106 年前的半形括號 `上更(一)`、少數全形括號 `上更（一）`、107 年後拿掉括號的 `上更一`，以及更早期用 Big5 造字區代替括號數字的 `上更` + 私用區字元。`src/tjcas/codes.py` 的 `normalize_code()` 把這些全部收斂成同一個 join key：NFKC 折疊 `㈠`、全形括號等變體成 `(一)`，Big5 造字則查表換成國字（`U+F674`–`U+F67E` 對應十一到一，靠交叉比對每篇判決自己的案號引用驗證），最後把所有括號字元（含角括號、方頭括號）整個拿掉。索引與引用兩側都套同一個函式，`CorpusIndex` 因此是用 `code_norm` 欄位查詢，不是原始字別。
+
+第 2 步的三種結果各有意義：`none` 是本專案的核心限制（1996 年前的判決不在開放資料中，或該字號其實是檢方案號）；`unique` 已經定案，不需要 NLP；`ambiguous` 才是第 3 步要處理的對象——同一組 `年/字別/案號` 在不同法院、不同審級可能各有一篇（例如 `85年台上字第326號` 民事、刑事各一）。
+
+判決書首頁必然重複自己的案號，那不是引用，第 1 步會依檔名比對把它濾掉。
+
+第 3 步的三種方法都以「字元」為特徵，因此不需要中文斷詞器，差別只在特徵攜帶多少上下文與如何加權：
+
+| 方法 | 特徵 | 加權 |
+|---|---|---|
+| `bow` | 字元 unigram | 詞頻 |
+| `ngram` | 字元 2–4 gram | 詞頻 |
+| `tfidf` | 字元 2–4 gram | TF-IDF（sublinear TF） |
+
+vectorizer 只用「引用處上下文 + 該次決策的候選們」來 fit，IDF 因此是**區域性**的：有鑑別力的特徵就是候選彼此之間有差異的那些。三個方法各自給出 top-1 與 margin。
+
+沒有 ground truth，因此評估只能看三個方法彼此有多一致：兩兩一致率、三者全體一致的 `unanimous`，以及**無法多數決**的 `no_majority`——三個方法選到三篇不同判決的比例（2:1 不算）。而「選到同一篇」有兩種讀法，報表兩種都給：
+
+| view | 判準 |
+|---|---|
+| `strict` | 比對 `(archive, entry)`，`SJEV,111,重簡,361,20250318,7.json` 與 `...,20250318,6.json` 是不同案 |
+| `loose` | 只比對檔名前四欄 `法院代碼,年度,字別,案號`，日期與序號視為同一案 |
+
+`loose` 的 key 必須含法院代碼，否則同一個 `(年, 字別, 案號)` 的候選會全部塌成一個 id，一致率恆為 1。它也不看 `archive`，因為同一個案子的兩個檔案不保證落在同一個月份包。`loose` 是 `strict` 的粗化，所以每個一致率只會升不會降、`no_majority` 只會降不會升，可以拿來當實作的 sanity check。
 
 ## Evaluation
 
@@ -98,8 +138,8 @@ regex 的條件寫的一旦多起來，很容易會導致邏輯衝突而匹配�
 ## Limitations
 
 - 司法院開放資料僅自 1996 年起，在此之前的被引用判決無法確認全文，只能標註為不確定
+- 引用只給出 `年/字別/案號`，法院名稱刻意不解析，因此同字號跨法院、跨審級的情形必須靠內文相似度裁決，而相似度沒有 ground truth，只能以三個方法的一致率間接評估
 - 判決附表會把年份與案號放在**不同欄位**（`│ 年度偵字第5727號`），這類引用需要重建表格結構才能救回
-- 尚未抽取引用前的法院名稱（`最高法院`、`本院`、`原審法院`），而這是第二階段比對的必要資訊
 - `unknown` 字別中有舊式或地方自訂寫法（`綠`、`汐雜`、`藍保管`），尚需人工判斷歸類
 
 ## Repository Structure
@@ -107,23 +147,40 @@ regex 的條件寫的一旦多起來，很容易會導致邏輯衝突而匹配�
 ```
 src/tjcas/
   config.py        專案路徑與 .env 設定
-  sampling.py      從壓縮檔抽樣判決（不解壓縮整包）
+  sampling.py      從壓縮檔列清單與抽取判決
   case_types.py    字別字典（PDF 解析 + 檔名統計）
   patterns.py      引用 regex：終極 pattern 與 partial pattern
+  gaps.py          全語料 regex 遺漏稽核（遺漏折成形狀計數）
+  numbers.py       國字數字 → 阿拉伯數字（位值制與逐字制）
+  codes.py         字別正規化（括號變體、Big5 造字 → 統一 join key）
+  corpus.py        全語料檔名索引（SQLite）
+  citations.py     階段一：全語料引用抽取
+  candidates.py    階段二：候選數量標記（none / unique / ambiguous）
+  similarity.py    階段三：bow / ngram / tfidf 三種相似度評分
+  resolution.py    階段三：上下文擷取、消歧與一致性報表
 scripts/
-  sample_cases.py      抽樣
-  build_case_types.py  建字別字典
-  audit_patterns.py    pattern 稽核與遺漏報告
+  sample_cases.py        抽樣
+  build_case_types.py    建字別字典
+  audit_patterns.py      pattern 稽核與遺漏報告
+  audit_corpus_patterns.py  全語料 pattern 遺漏稽核
+  build_corpus_index.py  建全語料檔名索引
+  extract_citations.py   階段一
+  match_candidates.py    階段二
+  resolve_ambiguous.py   階段三
 data/
   samples/         抽出的判決 JSON（不進版控）
   reference/       實施要點 PDF（不進版控）
   manifest/        樣本清單、字別字典、稽核報告
+  index/           全語料檔名索引（不進版控，可重建）
+  citations/       階段一產出（不進版控）
+  candidates/      階段二產出（不進版控）
+  resolution/      階段三產出（不進版控）
 ```
 
 ## Requirements
 
 - Python 3.12+
-- `python-dotenv`、`pypdf`
+- `python-dotenv`、`pypdf`、`scikit-learn`
 - `rar` / `unrar`（用於列清單與抽單檔；實測 `7z` 解這批 RAR 會產生空檔，不可用）
 
 ## Prerequisite Data
@@ -154,6 +211,27 @@ virtualenv --python python3.12 .venv
 .venv/bin/python scripts/audit_patterns.py [--limit N]
 ```
 
+第二階段（全語料，建議在 tmux 裡跑）：
+
+```bash
+# 0a. 先跨全語料稽核 regex 遺漏（改 pattern 會讓階段一全部失效，必須先跑）
+.venv/bin/python scripts/audit_corpus_patterns.py [--workers N]
+
+# 0b. 建全語料檔名索引
+.venv/bin/python scripts/build_corpus_index.py [--workers N]
+
+# 1. 抽出每篇判決的引用清單（逐包處理，可中斷續跑）
+.venv/bin/python scripts/extract_citations.py [--workers N]
+
+# 2. 標記每個引用 key 的候選數量
+.venv/bin/python scripts/match_candidates.py
+
+# 3. 對 ≥2 候選的引用做相似度消歧並比較三種方法
+.venv/bin/python scripts/resolve_ambiguous.py [--limit-keys N] [--max-per-key N]
+```
+
+所有階段都不寫檔到磁碟，因此不需要暫存區；一個 worker 負責一個壓縮檔，跑完就拿下一個。
+
 程式中使用：
 
 ```python
@@ -173,16 +251,21 @@ for citation in find_citations(normalize(judgment_full_text)):
 | 2 | `89年促字第││    26070號` 附表框線切斷 | normalize 時把框線字元換成空白 |
 | 2 | `九十年度南簡字第第九五○號` 重複的「第」 | 允許 `第{1,2}` |
 | 2 | `第一二四六二、一二七九八等號` | 允許 `等?號` |
+| 3 | 定應執行刑附表的 `編號 十   十一   十二` 讓終極 pattern 卡死（單篇 >9 小時） | 空白與案號的量詞改成 possessive，杜絕災難性回溯 |
+| 4 | `98年度附民字第123號`、`99年度國字第7號`、`103年度年訴字第15號`（642,324 + 74,975 + 9,294 筆） | 字別的排除清單原本整個字元擋掉 `民`/`國`/`年`，改成只擋成對的 `民國`、`年度` |
+| 4 | `八十四年度上更(二)字第一六二號`（242,179 筆） | 字別尾端允許括號輪次，`㈠`、`（一）`、`﹙一﹚` 由 NFKC 收成 `(一)`，另補 `〈〉〔〕【】` |
+| 4 | 舊式字別用 Big5 造字（`上更` 接 U+F67E） | 字別的字元集加入造字區 `\ue000-\uf8ff` |
+| 4 | `第一七四三、第三四○三、第三九三九號`（6,988 筆） | 頓號連寫的每一項都允許重複「第」 |
 
 ## Options of Full Text Similarity Comparison
 
-尚未實作。規劃中的選項：TF-IDF vectorization、bag of words、embedding。
+目前提供三種輕量化方法（見 `src/tjcas/similarity.py` 的 `METHODS`）：`bow`、`ngram`、`tfidf`。新增方法只要在 `METHODS` 裡加一個符合 scikit-learn vectorizer 介面的 factory 即可，報表的一致率會自動把它納入兩兩比較。embedding 方法尚未實作。
 
 ## Development
 
 分支策略：`main` ← `develop` ← `feat/*`。開發計畫放在 `develop-plan/`。
 
-註：`data/samples/`、`data/reference/`、`data/manifest/pattern_gaps.csv` 不進版控（體積大且可重建）。
+註：`data/samples/`、`data/reference/`、`data/manifest/pattern_gaps.csv` 與第二階段的所有產出（`data/index/`、`data/citations/`、`data/candidates/`、`data/resolution/`）不進版控（體積大且可重建）。
 
 ## Contributing
 

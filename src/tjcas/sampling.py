@@ -1,7 +1,7 @@
-"""Sample judgment JSON files out of the monthly RAR archives.
+"""Read judgment JSON out of the monthly RAR archives.
 
-Archives are never fully extracted: entries are listed with ``rar l`` and the
-selected ones are streamed out individually with ``rar p``.
+Archives are never written to disk: entries are listed with ``rar l`` and their
+contents are streamed straight out of ``rar p``.
 """
 
 from __future__ import annotations
@@ -70,6 +70,33 @@ def iter_entries(archive: Path) -> Iterator[ArchiveEntry]:
 def largest_entry(archive: Path, suffix: str = ".json") -> ArchiveEntry | None:
     candidates = (e for e in iter_entries(archive) if e.name.endswith(suffix))
     return max(candidates, key=lambda e: e.size, default=None)
+
+
+def stream_entries(archive: Path) -> Iterator[tuple[ArchiveEntry, bytes]]:
+    """Yield ``(entry, raw bytes)`` for every file in ``archive``, touching no disk.
+
+    ``rar p`` writes the entries back to back in listing order, so the stream is
+    cut up using the sizes ``rar l`` already reported.
+    """
+    entries = list(iter_entries(archive))
+    process = subprocess.Popen(
+        [RAR_BIN, "p", "-inul", str(archive)], stdout=subprocess.PIPE
+    )
+    stdout = process.stdout
+    assert stdout is not None
+    try:
+        for entry in entries:
+            payload = stdout.read(entry.size)
+            if len(payload) != entry.size:
+                raise RuntimeError(
+                    f"{archive.name}: stream ended inside {entry.name}"
+                )
+            yield entry, payload
+    finally:
+        stdout.close()
+        if process.poll() is None:
+            process.terminate()
+        process.wait()
 
 
 def extract_entry(entry: ArchiveEntry, dest_dir: Path) -> Path:
