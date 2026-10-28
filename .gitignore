@@ -12,3 +12,4 @@ data/resolution/
 *.pdf
 
 .venv
+develop-plan/
