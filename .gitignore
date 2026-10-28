@@ -10,5 +10,4 @@ data/citations/
 data/candidates/
 data/resolution/
 *.pdf
-
-.venvdata/comparison/
+data/comparison/
