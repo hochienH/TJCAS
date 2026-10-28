@@ -8,9 +8,16 @@
 > - 缺點：司法院公開資料僅從 1996 年開始，在此之前無法確定全文就只能標註不確定
 
 ## Project Status
-In Progress
+三個階段都已在全語料（1996-01 至 2026-03，363 個月份壓縮檔，21,965,977 篇判決）跑完（2026-09／10）：
 
-第一階段（regex 抽取）已完成：樣本抽樣、引用 pattern、字別字典與遺漏稽核工具。第二階段（全文比對）的管線已實作完成並通過小規模測試，全語料的大規模執行尚未進行。
+- 第一階段 regex 抽取：43,054,519 個引用 occurrence；去重後 31,877,397 條（來源判決, 年字號）邊
+- 第二階段 候選比對：8,545,230 個相異年字號；依候選數分桶 none 23.1M / unique 4.74M / ambiguous 15.18M occurrence
+- 第三階段 相似度消歧：1,613,052 個 ambiguous key、15,183,107 個 occurrence，三種方法（bow、ngram、tfidf），hostD 2 核 41.3 小時；
+  三方法全體一致 .586（strict）/ .620（loose），無多數 .080 / .069
+
+沒有人工 ground truth。以 JURIX-2026 的傳統 regex（法院名＋年字號）當 silver reference：語料內有檔的 JURIX 邊 TJCAS 涵蓋 .996，
+另多抓 JURIX 沒有的邊 10.9M（T 的 72%）；兩邊都抓到的 4,239,760 條邊上，法院層級一致率 .904（候選法院 2 個時 .968，3 個以上 .72–.75）。
+細節見 `develop-plan/STATUS-jurix-comparison.md` 與 `develop-plan/STATUS-stage3-resolve.md`。下一步是人工抽樣標註精確率與難案例的 accuracy。
 
 ## Quick Start
 
